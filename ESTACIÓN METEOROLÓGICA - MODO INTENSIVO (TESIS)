@@ -1,0 +1,171 @@
+/*
+ * ESTACIÓN METEOROLÓGICA - MODO INTENSIVO (TESIS)
+ * Objetivo: Recolección de alta densidad para entrenamiento de modelos ML.
+ * Duración del experimento: 2 días.
+ * Frecuencia de muestreo: cada 5 minutos.
+ * * --- HARDWARE ---
+ * 1. DHT22 (Temperatura y Humedad) -> PIN 32
+ * 2. BMP280 (Presión atmosférica)  -> Pines 21 (SDA) y 22 (SCL)
+ * 3. FC-37 (Sensor de lluvia)      -> Pin 34
+ * 4. LDR (Sensor de luz)           -> Pin 35
+ * 5. Batería (2x 18650 en paralelo)
+ */
+
+#include "ThingSpeak.h"
+#include "WiFi.h"
+#include "DHT.h"
+#include <Wire.h>
+#include <Adafruit_Sensor.h>
+#include <Adafruit_BMP280.h>
+#include <math.h>
+
+// ==========================================
+// CONFIGURACIÓN DE TIEMPO
+// ==========================================
+#define TIEMPO_DE_SUEÑO_MINUTOS  5
+#define US_TO_S_FACTOR 1000000ULL
+
+// ==========================================
+// CREDENCIALES WIFI Y THINGSPEAK (ACTUALIZADAS)
+// ==========================================
+const char* ssid = "Ivan";           // <--- Actualizado
+const char* password = "casa12345";  // <--- Actualizado
+
+unsigned long channelID = 3230651;
+const char* WriteAPIKey = "QXHAOJRHC5UUPCJW";
+
+// ==========================================
+// DEFINICIÓN DE PINES
+// ==========================================
+#define PIN_DHT      32
+#define PIN_LLUVIA   34
+#define PIN_LDR      35
+
+// ==========================================
+// OBJETOS Y VARIABLES
+// ==========================================
+DHT dht(PIN_DHT, DHT22);
+Adafruit_BMP280 bmp;
+WiFiClient cliente;
+
+float temperatura = 0.0;
+float humedad = 0.0;
+float presion = 0.0;
+float punto_rocio = 0.0;
+int pct_lluvia = 0;
+int pct_luz = 0;
+int es_de_dia = 0;
+
+// ==========================================
+// PROTOTIPOS DE FUNCIONES
+// ==========================================
+void conectarWiFi();
+void tomarLecturas();
+void enviarDatos();
+float calcularPuntoRocio(float temp, float hum);
+
+// ==========================================
+// SETUP
+// ==========================================
+void setup() {
+  Serial.begin(115200);
+  delay(500);
+
+  // Inicialización de sensores
+  pinMode(PIN_LLUVIA, INPUT);
+  pinMode(PIN_LDR, INPUT);
+  dht.begin();
+
+  // Inicialización del BMP280
+  if (!bmp.begin(0x76)) {
+    bmp.begin(0x77);
+  }
+
+  // Conexión a la red WiFi
+  conectarWiFi();
+
+  // Lectura de sensores
+  tomarLecturas();
+
+  // Envío de datos a ThingSpeak
+  ThingSpeak.begin(cliente);
+  enviarDatos();
+
+  // Entrada en modo Deep Sleep para ahorro de batería
+  esp_sleep_enable_timer_wakeup(
+    (uint64_t)TIEMPO_DE_SUEÑO_MINUTOS * 60ULL * US_TO_S_FACTOR
+  );
+  Serial.flush();
+  esp_deep_sleep_start();
+}
+
+void loop() {
+  // No se utiliza debido al uso de Deep Sleep
+}
+
+// ==========================================
+// FUNCIONES
+// ==========================================
+void conectarWiFi() {
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid, password);
+
+  int intentos = 0;
+  while (WiFi.status() != WL_CONNECTED && intentos < 20) {
+    delay(500);
+    intentos++;
+  }
+
+  if (WiFi.status() != WL_CONNECTED) {
+    esp_sleep_enable_timer_wakeup(
+      (uint64_t)TIEMPO_DE_SUEÑO_MINUTOS * 60ULL * US_TO_S_FACTOR
+    );
+    esp_deep_sleep_start();
+  }
+}
+
+float calcularPuntoRocio(float temp, float hum) {
+  if (hum <= 0.0) return 0.0;
+  const double a = 17.27;
+  const double b = 237.7;
+  double alpha = ((a * temp) / (b + temp)) + log(hum / 100.0);
+  return (float)((b * alpha) / (a - alpha));
+}
+
+void tomarLecturas() {
+  dht.readTemperature();
+  delay(200);
+
+  temperatura = dht.readTemperature();
+  humedad = dht.readHumidity();
+
+  if (isnan(temperatura) || isnan(humedad)) {
+    temperatura = 0.0;
+    humedad = 0.0;
+  }
+
+  presion = bmp.readPressure() / 100.0F;
+
+  int raw_lluvia = analogRead(PIN_LLUVIA);
+  pct_lluvia = map(raw_lluvia, 4095, 1500, 0, 100);
+  pct_lluvia = constrain(pct_lluvia, 0, 100);
+
+  int raw_luz = analogRead(PIN_LDR);
+  pct_luz = map(raw_luz, 4095, 0, 0, 100);
+  pct_luz = constrain(pct_luz, 0, 100);
+
+  punto_rocio = calcularPuntoRocio(temperatura, humedad);
+  es_de_dia = (pct_luz > 20) ? 1 : 0;
+}
+
+void enviarDatos() {
+  ThingSpeak.setField(1, temperatura);
+  ThingSpeak.setField(2, humedad);
+  ThingSpeak.setField(3, punto_rocio);
+  ThingSpeak.setField(4, (float)pct_lluvia);
+  ThingSpeak.setField(5, presion);
+  ThingSpeak.setField(6, es_de_dia);
+  ThingSpeak.setField(7, (float)pct_luz);
+
+  ThingSpeak.writeFields(channelID, WriteAPIKey);
+}
